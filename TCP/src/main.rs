@@ -3,22 +3,26 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
+use tokio::time::timeout;
+
+use rand::Rng;
 
 use std::sync::Arc;
 use std::env;
 use std::io;
+use std::time::Duration;
 
 use crossterm::{execute, terminal::{Clear, ClearType}};
 use crossterm::cursor;
 
-
-
 #[derive(Debug, Serialize, Deserialize)]
+
+
 struct Packate {
     source_port: u16,
     destination_port: u16,
-    source_IP_address: u32,
-    destination_IP_address: u32,
+    source_IP_address: String,
+    destination_IP_address: String,
     syn_flag: u8,
     fyn_flag: u8,
     sequence_number: u32,
@@ -40,12 +44,25 @@ async fn main() {
     }
 
 
-
-
     let shared_input = Arc::new(Mutex::new(String::new()));
     let input_clone = Arc::clone(&shared_input);
 
+    let waiting_time = Duration::from_secs(2);
+
+    let mut rng = rand::thread_rng();
+
     let args: Vec<String> = env::args().collect();
+
+    let mut my_ip = String::from("127.0.0.1");
+    let mut his_ip = String::from("127.0.0.1");
+
+    if args.len() < 3{
+        println!("ERRORE NELL'ESECUZIONE DEL PROGRAMMA, PASSARE LE PORTE COME ARGOMENTO");
+        return;
+    }else if args.len() > 3{
+        my_ip = args[3].clone();
+        his_ip = args[4].clone();
+    }
 
     let my_port: u16 = match args[1].parse() {
         Ok(num) => num,
@@ -64,22 +81,22 @@ async fn main() {
     }; 
 
     let mut packate_to_send = Packate {
-        source_port: 0,
-        destination_port: 0,
-        source_IP_address: 0,
-        destination_IP_address: 0,
-        syn_flag: 0,
+        source_port: my_port,
+        destination_port: his_port,
+        source_IP_address: my_ip.clone(),
+        destination_IP_address: his_ip.clone(),
+        syn_flag: 1,
         fyn_flag: 0,
-        sequence_number: 0,
+        sequence_number: rng.gen_range(100..=1000),
         ACK_number: 0,
         message: String::new(),
     };
 
     let mut packate_to_receive = Packate {
-        source_port: 0,
-        destination_port: 0,
-        source_IP_address: 0,
-        destination_IP_address: 0,
+        source_port: his_port,
+        destination_port: my_port,
+        source_IP_address: his_ip.clone(),
+        destination_IP_address: my_ip.clone(),
         syn_flag: 0,
         fyn_flag: 0,
         sequence_number: 0,
@@ -91,10 +108,67 @@ async fn main() {
         handle_keyboard_input(input_clone).await;
     });
 
-    let socket = UdpSocket::bind(format!("127.0.0.1:{}", my_port)).await.unwrap();
-    let destination = format!("127.0.0.1:{}", his_port);
+    let socket = UdpSocket::bind(format!("{}:{}", my_ip, my_port)).await.unwrap();
+    let destination = format!("{}:{}", his_ip, his_port);
 
+     
     let mut buf = [0u8; 1024];
+
+
+
+    //INIZIO THREE WAY HANDSHAKE
+    let mut serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
+
+
+    while packate_to_receive.syn_flag == 0{
+
+        socket.send_to(&serialized_data, destination.clone()).await.expect("Failed to send SYN packet");
+        println!("INVIO PACCHETTO DI SINCORNIZZAZIONE...");
+
+        // Attendi la risposta
+        match timeout(waiting_time, socket.recv_from(&mut buf)).await {
+            // Ricezione di dati
+            Ok(result) => match result{
+                Ok((size, _source)) => {
+                    packate_to_receive = bincode::deserialize(&buf[..size]).unwrap();
+                    println!("ricevuto pacchetto");
+                    break; // Esci dal ciclo una volta ricevuto il pacchetto
+                }
+                // Nessun dato disponibile, continua con il ciclo
+                Err(e) => {
+                    eprintln!("Error ok intero: {}", e);
+                }
+            },
+            // Altro errore, interrompi l'esecuzione
+            Err(e) => {
+                println!("NESSUNA RISPOSTA RICEVUTA...\n");
+            }
+        }
+
+    }
+
+    if packate_to_receive.ACK_number == 0 {
+        
+        println!("HO RICEVUTO UNA RICHIESTA DI CONNESSIONE, RISPONDO CON SYN E ACK");
+        packate_to_send.ACK_number = packate_to_receive.sequence_number + 1;
+        
+        serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
+        
+
+    }else if packate_to_receive.ACK_number != 0 {
+        println!("QUALCUNO HA RICEVUTO LA MIA RICHIESTA DI CONNESSIONE, PROCEDO A CONVERMARE LA RICEZIONE...");
+        
+        packate_to_send.syn_flag = 0;
+        packate_to_send.ACK_number = packate_to_receive.sequence_number + 1;
+
+        serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
+
+
+    }
+
+
+
+    //FINE THREE WAY HANDSHAKE
 
     loop {
         tokio::select! {
@@ -113,7 +187,7 @@ async fn main() {
                 if !input.is_empty() {
                     packate_to_send.message = input.clone();
                     println!("");
-                    let serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
+                    serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
                     socket.send_to(&serialized_data, destination.clone()).await.expect("Failed to send");
                     *input = String::new();
                 }
