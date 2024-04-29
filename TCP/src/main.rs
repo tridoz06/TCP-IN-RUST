@@ -23,6 +23,7 @@ struct Packate {
     destination_port: u16,
     source_IP_address: String,
     destination_IP_address: String,
+    window: u16;
     syn_flag: u8,
     fyn_flag: u8,
     sequence_number: u32,
@@ -85,6 +86,7 @@ async fn main() {
         destination_port: his_port,
         source_IP_address: my_ip.clone(),
         destination_IP_address: his_ip.clone(),
+        window = rng.gen_range(100..=200);
         syn_flag: 1,
         fyn_flag: 0,
         sequence_number: rng.gen_range(100..=1000),
@@ -119,55 +121,7 @@ async fn main() {
     //INIZIO THREE WAY HANDSHAKE
     let mut serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
 
-
-    while packate_to_receive.syn_flag == 0{
-
-        socket.send_to(&serialized_data, destination.clone()).await.expect("Failed to send SYN packet");
-        println!("INVIO PACCHETTO DI SINCORNIZZAZIONE...");
-
-        // Attendi la risposta
-        match timeout(waiting_time, socket.recv_from(&mut buf)).await {
-            // Ricezione di dati
-            Ok(result) => match result{
-                Ok((size, _source)) => {
-                    packate_to_receive = bincode::deserialize(&buf[..size]).unwrap();
-                    println!("ricevuto pacchetto");
-                    break; // Esci dal ciclo una volta ricevuto il pacchetto
-                }
-                // Nessun dato disponibile, continua con il ciclo
-                Err(e) => {
-                    eprintln!("Error ok intero: {}", e);
-                }
-            },
-            // Altro errore, interrompi l'esecuzione
-            Err(e) => {
-                println!("NESSUNA RISPOSTA RICEVUTA...\n");
-            }
-        }
-
-    }
-
-    if packate_to_receive.ACK_number == 0 {
-        
-        println!("HO RICEVUTO UNA RICHIESTA DI CONNESSIONE, RISPONDO CON SYN E ACK");
-        packate_to_send.ACK_number = packate_to_receive.sequence_number + 1;
-        
-        serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
-        
-
-    }else if packate_to_receive.ACK_number != 0 {
-        println!("QUALCUNO HA RICEVUTO LA MIA RICHIESTA DI CONNESSIONE, PROCEDO A CONVERMARE LA RICEZIONE...");
-        
-        packate_to_send.syn_flag = 0;
-        packate_to_send.ACK_number = packate_to_receive.sequence_number + 1;
-
-        serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
-
-
-    }
-
-
-
+    let mut done_three_way_hand_shake: u8 = 0;
     //FINE THREE WAY HANDSHAKE
 
     loop {
@@ -180,16 +134,94 @@ async fn main() {
                     }
                     Err(e) => eprintln!("Errore durante la ricezione dei dati UDP: {}", e),
                 }
+
+                if packate_to_receive.syn_flag == 1 {
+                    packate_to_send.syn_flag = 1;
+                    packate_to_send.ACK_number = packate_to_receive.sequence_number + 1;
+                    println!("RICEVUTO MESSAGGIO DI RICHIESTA SINCRONIZZAZIONE, MANDO ACK...");
+
+                    serialized_data = bincode::serialize(&packate_to_send).expect("failed to serialize");
+                    socket.send_to(&serialized_data, destination.clone()).await.expect("failed to send");
+
+                    while packate_to_receive.ACK_number != packate_to_send.sequence_number + 1{
+                        
+                        match timeout(waiting_time, socket.recv_from(&mut buf)).await {
+                            // Ricezione di dati
+                            Ok(result) => match result{
+                                Ok((size, _source)) => {
+                                    packate_to_receive = bincode::deserialize(&buf[..size]).unwrap();
+                                    break; // Esci dal ciclo una volta ricevuto il pacchetto
+                                }
+                                // Nessun dato disponibile, continua con il ciclo
+                                Err(e) => { }
+                            },
+                            // Altro errore, interrompi l'esecuzione
+                            Err(e) => {
+                                println!("NESSUNA RISPOSTA RICEVUTA...\n");
+                            }
+                        }    
+                    }
+
+                    println!("ACK RICEVUTO, PROCEDO ALLA COMUNICAZIONE...");
+                    packate_to_send.syn_flag = 0;
+                    done_three_way_hand_shake = 1;
+
+                }
             }
+
 
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                 let mut input = shared_input.lock().await;
                 if !input.is_empty() {
-                    packate_to_send.message = input.clone();
-                    println!("");
-                    serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
-                    socket.send_to(&serialized_data, destination.clone()).await.expect("Failed to send");
-                    *input = String::new();
+
+                    if done_three_way_hand_shake == 0 {
+                        done_three_way_hand_shake = 1;
+
+                        packate_to_send.syn_flag = 1;
+                        
+                        while packate_to_receive.syn_flag == 0{
+
+                            socket.send_to(&serialized_data, destination.clone()).await.expect("Failed to send SYN packet");
+                            println!("INVIO PACCHETTO DI SINCORNIZZAZIONE...");
+                    
+                            // Attendi la risposta
+                            match timeout(waiting_time, socket.recv_from(&mut buf)).await {
+                                // Ricezione di dati
+                                Ok(result) => match result{
+                                    Ok((size, _source)) => {
+                                        packate_to_receive = bincode::deserialize(&buf[..size]).unwrap();
+                                        break; // Esci dal ciclo una volta ricevuto il pacchetto
+                                    }
+                                    // Nessun dato disponibile, continua con il ciclo
+                                    Err(e) => { }
+                                },
+                                // Altro errore, interrompi l'esecuzione
+                                Err(e) => {
+                                    println!("NESSUNA RISPOSTA RICEVUTA...\n");
+                                }
+                            }
+                    
+                        }
+
+                        println!("RICEVUTA CONFERMA DI ACK PER IL MIO MESSAGGIO, RISPONDO CON ACK PER CONFERMARE...");
+
+                        packate_to_send.syn_flag = 0;
+                        packate_to_send.ACK_number = packate_to_receive.sequence_number + 1;
+                        packate_to_send.sequence_number = 0;
+
+                        serialized_data = bincode::serialize(&packate_to_send).expect("failed to serialize");
+
+                        socket.send_to(&serialized_data, destination.clone()).await.expect("failde to send");
+
+                    }else{
+                        packate_to_send.message = input.clone();
+                        packate_to_send.syn_flag = 0;
+                        println!("");
+                        serialized_data = bincode::serialize(&packate_to_send).expect("Failed to serialize");
+                        socket.send_to(&serialized_data, destination.clone()).await.expect("Failed to send");
+                        *input = String::new();
+                    }
+
                 }
             }
         }
